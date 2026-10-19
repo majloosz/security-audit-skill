@@ -276,11 +276,20 @@ function preflightJsonText(contents) {
 
 function preflightDocument(root) {
   const errors = createErrorList();
-  const stack = [{ value: root, depth: 0, location: "$" }];
+  const stack = [{ value: root, depth: 0, step: null }];
   let visited = 0;
 
+  function locationOf(step) {
+    if (!step) return "$";
+    const trail = [];
+    for (let node = step; node; node = node.parent) trail.push(node.text);
+    let location = "$";
+    for (let index = trail.length - 1; index >= 0; index--) location += trail[index];
+    return location;
+  }
+
   while (stack.length > 0) {
-    const { value, depth, location } = stack.pop();
+    const { value, depth, step } = stack.pop();
     visited++;
     if (visited > LIMITS.preflightValues) {
       errors.push(`$: exceeds ${LIMITS.preflightValues} total values`);
@@ -288,30 +297,30 @@ function preflightDocument(root) {
     }
     if (value === null || typeof value !== "object") continue;
     if (depth >= LIMITS.nestingDepth) {
-      errors.push(`${location}: exceeds nesting depth limit ${LIMITS.nestingDepth}`);
+      errors.push(`${locationOf(step)}: exceeds nesting depth limit ${LIMITS.nestingDepth}`);
       return errors;
     }
 
     if (Array.isArray(value)) {
-      const limit = location === "$" ? MAX_UNITS : MAX_LIST_ITEMS;
+      const limit = step === null ? MAX_UNITS : MAX_LIST_ITEMS;
       if (value.length > limit) {
-        errors.push(`${location}: exceeds ${limit} entries`);
+        errors.push(`${locationOf(step)}: exceeds ${limit} entries`);
         return errors;
       }
       for (let index = value.length - 1; index >= 0; index--) {
-        stack.push({ value: value[index], depth: depth + 1, location: `${location}[${index}]` });
+        stack.push({ value: value[index], depth: depth + 1, step: { parent: step, text: `[${index}]` } });
       }
       continue;
     }
 
     const keys = Object.keys(value);
     if (keys.length > LIMITS.objectFields) {
-      errors.push(`${location}: exceeds ${LIMITS.objectFields} object fields`);
+      errors.push(`${locationOf(step)}: exceeds ${LIMITS.objectFields} object fields`);
       return errors;
     }
     for (let index = keys.length - 1; index >= 0; index--) {
       const key = keys[index];
-      stack.push({ value: value[key], depth: depth + 1, location: `${location}{${index}}` });
+      stack.push({ value: value[key], depth: depth + 1, step: { parent: step, text: `{${index}}` } });
     }
   }
 
@@ -754,7 +763,11 @@ function readFileWithinLimit(file) {
       throw new SafeInputError("input is not valid UTF-8");
     }
   } finally {
-    fs.closeSync(descriptor);
+    try {
+      fs.closeSync(descriptor);
+    } catch {
+      // A close failure must not mask an in-flight read error or fail a completed read.
+    }
   }
 }
 

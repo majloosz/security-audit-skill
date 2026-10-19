@@ -15,11 +15,12 @@ target-controlled code only inside the approved OS-enforced sandbox: no external
 network, empty allowlisted environment, read-only target and tools, scratch-only
 writes, and explicit low resource and wall-clock limits. If any control is unavailable,
 do not execute; retain the exact missing capability as a needs_validation blocker.
-Treat every scratch entry as target-controlled after execution. After the sandbox and
-all its processes terminate, only trusted parent-side code may promote a predeclared
-scratch-relative file, following the promotion procedure block included verbatim in
-this prompt. You and target code never write retained artifacts. If promotion is
-unavailable or fails, do not use that file as evidence.
+Treat every scratch entry as target-controlled after execution. After the parent has
+killed and reaped all sandbox processes, verified none remain, and torn down the
+loopback namespace and disposable source copy, only trusted parent-side code may
+promote a predeclared scratch-relative file, following the promotion procedure
+block included verbatim in this prompt. You and target code never write retained
+artifacts. If promotion is unavailable or fails, do not use that file as evidence.
 
 1. Verify every trace and evidence file, positive line number, scope, and description.
    Confirm the first entry is a real lower-trust entrypoint and the last is the
@@ -54,9 +55,10 @@ Reference only for you: the parent performs these steps; you never perform them.
 Before execution, the parent opens and retains trusted, non-inheritable directory
 descriptors for the agent's scratch/ and artifacts/ roots, and records an allowlist
 of expected scratch-relative artifact files plus explicit per-file and cumulative
-byte limits. Never pass those descriptors to the agent or sandbox. After the sandbox
-and all its processes terminate, trusted parent-side code promotes each allowlisted
-file separately:
+byte limits. Never pass those descriptors to the agent or sandbox. After the parent
+has killed and reaped all sandbox processes, verified none remain, and torn down
+the loopback namespace and disposable source copy, trusted parent-side code
+promotes each allowlisted file separately:
 
 1. Validate the declared relative path: reject absolute, empty, `.`, `..`, or
    symlinked components.
@@ -67,7 +69,9 @@ file separately:
    within the recorded per-file and cumulative byte limits.
 5. Enforce those limits again while reading from that descriptor.
 6. Copy exactly the verified size, repeat `fstat`, and reject a changed identity,
-   type, link count, or size.
+   type, link count, or size; then re-read the leaf and reject any byte difference
+   so a same-size swap between the read and the re-`fstat` is rejected like a size
+   change.
 7. For the destination, walk every parent component from the retained
    artifacts-root descriptor with no-follow directory-relative operations; require
    each existing component to be a real directory, and create any missing directory
@@ -142,7 +146,7 @@ For `needs_validation`, require it to check:
 
 Each verifier returns exactly one JSON object: `{"decision":"verified","fingerprint":"..."}` or `{"decision":"replace","reason":"...","record":{...}}`, with no surrounding prose. A replacement record must match its `confirmed`, `needs_validation`, or `rejected` schema branch. Treat a malformed or prose-wrapped Phase 5 result the same way as in Phase 3: discard it without repairing it and re-run with a fresh verifier when the budget permits.
 
-Do not apply a Phase 5 replacement as final when it promotes a record to a stronger verdict, including any promotion to `confirmed`, or materially changes the root cause, trace, execution input or observed result, demonstrated impact, or severity. Give that complete replacement to a new independent verifier that did not hunt, perform Phase 3 validation, or propose the Phase 5 replacement. The new verifier rechecks the current source and independently reproduces any decisive local result under the execution boundary, then returns `verified` or another replacement. Apply a material replacement only after this fresh verification. If another material replacement results, repeat with a fresh verifier. If budget or independence is unavailable, remove the disputed record from `findings.json`, keep its ledger unit as an unresolved candidate, and set `run_status: "incomplete"` with an exact `incomplete_reason`. Non-material wording or repository-line corrections may be applied directly when they do not change meaning or evidence.
+Do not apply a Phase 5 replacement as final when it promotes a record to a stronger verdict, including any promotion to `confirmed`, or materially changes the root cause, trace, execution input or observed result, demonstrated impact, or severity. Give that complete replacement to a new independent verifier that did not hunt, perform Phase 3 validation, or propose the Phase 5 replacement. The new verifier rechecks the current source and independently reproduces any decisive local result under the execution boundary, then returns `verified` or another replacement. Apply a material replacement only after this fresh verification. If another material replacement results, repeat with a fresh verifier. If budget or independence is unavailable, remove the disputed record from `findings.json`, keep its ledger unit as an unresolved candidate, and set `run_status: "incomplete"` with an exact `incomplete_reason`. Non-material wording or repository-line corrections may be applied directly when they do not change meaning or evidence. Verdict-weakening removals (dropping severity, impact, execution, or observed-result detail when demoting a record) always count as material changes requiring fresh-verifier re-check.
 
 After every applied replacement, rerun both validators and update linked ledger decisions. If a final verifier identifies a separate root cause, assign a new fingerprint and send it through independent candidate validation before inclusion. Set `run_status: "complete"` only when every ledger candidate has an independent final disposition and every retained record passes Phase 5.
 

@@ -7,8 +7,13 @@ const test = require("node:test");
 const schema = require("./report-schema.json");
 const {
   LIMITS,
+  canonicalKey,
   collect,
   collectSchemaErrors,
+  deepEqual,
+  loadSchema,
+  readFileWithinLimit,
+  validate,
   validateDocument,
 } = require("./validate-findings.cjs");
 
@@ -521,6 +526,22 @@ test("CLI rejects an oversized array without an exception trace", () => {
   assert.doesNotMatch(output, /RangeError|Maximum call stack|heap out of memory/i);
 });
 
+test("CLI rejects an over-wide object without an exception trace", () => {
+  const wide = Object.fromEntries(Array.from({ length: LIMITS.objectFields + 1 }, (_, id) => [`k${id}`, null]));
+  const result = runCli(JSON.stringify(wide));
+  const output = cliOutput(result);
+  assert.equal(result.status, 1, output);
+  assert.match(output, new RegExp(`${LIMITS.objectFields} field object limit`));
+  assert.doesNotMatch(output, /RangeError|Maximum call stack|heap out of memory/i);
+});
+
+test("object field limit accepts exactly objectFields keys", () => {
+  const atLimit = Object.fromEntries(Array.from({ length: LIMITS.objectFields }, (_, id) => [`k${id}`, null]));
+  assert.doesNotMatch(errorsFor(atLimit).join("\n"), /field object limit/);
+  const overLimit = Object.fromEntries(Array.from({ length: LIMITS.objectFields + 1 }, (_, id) => [`k${id}`, null]));
+  assert.match(errorsFor(overLimit).join("\n"), new RegExp(`${LIMITS.objectFields} field object limit`));
+});
+
 test("checks pattern and branch invariants", () => {
   rejectMutation(rejected, (finding) => { finding.fingerprint = "not stable"; });
   rejectMutation(needsValidation, (finding) => {
@@ -588,7 +609,7 @@ test("keeps shared helpers aligned with the coverage-ledger validator", () => {
   const sharedLimitKeys = Object.keys(findingsModule.LIMITS)
     .filter((key) => Object.prototype.hasOwnProperty.call(ledgerModule.LIMITS, key))
     .sort();
-  assert.deepEqual(sharedLimitKeys, ["inputBytes", "nestingDepth", "validationErrors"]);
+  assert.deepEqual(sharedLimitKeys, ["inputBytes", "nestingDepth", "objectFields", "validationErrors"]);
   for (const key of sharedLimitKeys) {
     assert.equal(findingsModule.LIMITS[key], ledgerModule.LIMITS[key], `LIMITS.${key}`);
   }
@@ -649,4 +670,96 @@ test("keeps shared helpers aligned with the coverage-ledger validator", () => {
       `prose verdict diverges for ${JSON.stringify(value)}`,
     );
   }
+});
+
+test("a close failure does not mask the original read error", { skip: !HAS_SAFE_INPUT_OPEN }, () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "validate-findings-close-"));
+  const originalClose = fs.closeSync;
+  fs.closeSync = () => { throw new Error("injected close failure"); };
+  try {
+    assert.throws(() => readFileWithinLimit(directory), /input must be a regular file/);
+  } finally {
+    fs.closeSync = originalClose;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a close failure does not fail a completed read", { skip: !HAS_SAFE_INPUT_OPEN }, () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "validate-findings-close-"));
+  const inputPath = path.join(directory, "findings.json");
+  fs.writeFileSync(inputPath, "[]");
+  const originalClose = fs.closeSync;
+  fs.closeSync = () => { throw new Error("injected close failure"); };
+  try {
+    assert.equal(readFileWithinLimit(inputPath), "[]");
+  } finally {
+    fs.closeSync = originalClose;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("loadSchema still loads the shipped schema", () => {
+  assert.equal(loadSchema(path.join(__dirname, "report-schema.json")).type, "array");
+});
+
+test("loadSchema rejects a symlinked schema file", { skip: process.platform === "win32" || !HAS_SAFE_INPUT_OPEN }, () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "validate-findings-schema-"));
+  try {
+    fs.writeFileSync(path.join(directory, "real.json"), "[]");
+    const linkPath = path.join(directory, "schema.json");
+    fs.symlinkSync(path.join(directory, "real.json"), linkPath);
+    assert.throws(() => loadSchema(linkPath), /input must not be a symlink/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("loadSchema rejects an oversized schema file", { skip: !HAS_SAFE_INPUT_OPEN }, () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "validate-findings-schema-"));
+  try {
+    const bigPath = path.join(directory, "schema.json");
+    fs.writeFileSync(bigPath, Buffer.alloc(LIMITS.inputBytes + 1, 0x20));
+    assert.throws(() => loadSchema(bigPath), /byte limit/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("schema checks enforce an explicit depth budget", () => {
+  const nestedSchema = (levels) => {
+    let node = { type: "string" };
+    for (let depth = 0; depth < levels; depth++) node = { type: "object", properties: { a: node } };
+    return node;
+  };
+  assert.doesNotMatch(
+    collectSchemaErrors(nestedSchema(LIMITS.nestingDepth)).join("\n"),
+    /nesting depth limit/,
+  );
+  assert.match(
+    collectSchemaErrors(nestedSchema(LIMITS.nestingDepth + 1)).join("\n"),
+    new RegExp(`${LIMITS.nestingDepth} level nesting depth limit`),
+  );
+  assert.doesNotThrow(() => collectSchemaErrors(nestedSchema(20000)));
+});
+
+test("recursive helpers enforce an explicit depth budget", () => {
+  const nested = (levels) => (levels === 0 ? 0 : [nested(levels - 1)]);
+  const atLimit = nested(LIMITS.nestingDepth);
+  const overLimit = nested(LIMITS.nestingDepth + 1);
+
+  // deepEqual caps container recursion; identical scalars short-circuit safely.
+  assert.equal(deepEqual(atLimit, nested(LIMITS.nestingDepth)), true);
+  assert.equal(deepEqual(nested(70), nested(70)), false);
+
+  assert.doesNotThrow(() => canonicalKey(atLimit));
+  assert.throws(() => canonicalKey(overLimit), /nesting depth limit/);
+
+  const cyclicSchema = { type: "array" };
+  cyclicSchema.items = cyclicSchema;
+  const atLimitErrors = [];
+  validate(atLimit, cyclicSchema, "$", atLimitErrors);
+  assert.doesNotMatch(atLimitErrors.join("\n"), /nesting depth limit/);
+  const overLimitErrors = [];
+  validate(overLimit, cyclicSchema, "$", overLimitErrors);
+  assert.match(overLimitErrors.join("\n"), new RegExp(`${LIMITS.nestingDepth} level nesting depth limit`));
 });
