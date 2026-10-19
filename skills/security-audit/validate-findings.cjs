@@ -43,6 +43,7 @@ const LIMITS = Object.freeze({
   inputBytes: 5 * 1024 * 1024,
   nestingDepth: 64,
   arrayItems: 1000,
+  objectFields: 1000,
   canonicalKeyBytes: 1024 * 1024,
   uniqueSetBytes: 5 * 1024 * 1024,
   validationErrors: 100,
@@ -109,17 +110,18 @@ function typeOf(value) {
   return typeof value;
 }
 
-function deepEqual(left, right) {
+function deepEqual(left, right, depth = 0) {
   if (left === right) return true;
+  if (depth > LIMITS.nestingDepth) return false;
   if (typeOf(left) !== typeOf(right)) return false;
   if (Array.isArray(left)) {
-    return left.length === right.length && left.every((value, index) => deepEqual(value, right[index]));
+    return left.length === right.length && left.every((value, index) => deepEqual(value, right[index], depth + 1));
   }
   if (left !== null && typeof left === "object") {
     const leftKeys = Object.keys(left);
     const rightKeys = Object.keys(right);
     return leftKeys.length === rightKeys.length &&
-      leftKeys.every((key) => hasOwn(right, key) && deepEqual(left[key], right[key]));
+      leftKeys.every((key) => hasOwn(right, key) && deepEqual(left[key], right[key], depth + 1));
   }
   return false;
 }
@@ -169,7 +171,10 @@ function canonicalKey(value) {
     chunks.push(chunk);
   }
 
-  function encode(item) {
+  function encode(item, depth) {
+    if (depth > LIMITS.nestingDepth) {
+      throw new Error(`canonical key exceeds ${LIMITS.nestingDepth} level nesting depth limit`);
+    }
     const type = typeOf(item);
     if (type === "null") {
       append("null");
@@ -183,7 +188,7 @@ function canonicalKey(value) {
       append("array:[");
       item.forEach((entry, index) => {
         if (index > 0) append(",");
-        encode(entry);
+        encode(entry, depth + 1);
       });
       append("]");
     } else if (type === "object") {
@@ -192,7 +197,7 @@ function canonicalKey(value) {
         if (index > 0) append(",");
         append(JSON.stringify(key));
         append(":");
-        encode(item[key]);
+        encode(item[key], depth + 1);
       });
       append("}");
     } else {
@@ -200,7 +205,7 @@ function canonicalKey(value) {
     }
   }
 
-  encode(value);
+  encode(value, 0);
   return { key: chunks.join(""), bytes };
 }
 
@@ -231,6 +236,9 @@ function collectDataLimitErrors(value, location = "$data") {
       }
     } else {
       const keys = Object.keys(current.value);
+      if (keys.length > LIMITS.objectFields) {
+        return [escapeUnsafeDiagnosticCharacters(`${current.location}: exceeds ${LIMITS.objectFields} field object limit`)];
+      }
       for (let index = keys.length - 1; index >= 0; index--) {
         const key = keys[index];
         const child = current.value[key];
@@ -247,7 +255,11 @@ function collectDataLimitErrors(value, location = "$data") {
 function collectSchemaErrors(schema, location = "schema") {
   const errors = createErrorList();
 
-  function check(node, p) {
+  function check(node, p, depth = 0) {
+    if (depth > LIMITS.nestingDepth) {
+      errors.push(`${p}: exceeds ${LIMITS.nestingDepth} level nesting depth limit`);
+      return;
+    }
     if (node === null || typeof node !== "object" || Array.isArray(node)) {
       errors.push(`${p}: schema must be an object`);
       return;
@@ -270,7 +282,7 @@ function collectSchemaErrors(schema, location = "schema") {
       if (node.properties === null || typeof node.properties !== "object" || Array.isArray(node.properties)) {
         errors.push(`${p}.properties: expected object`);
       } else {
-        for (const key of Object.keys(node.properties)) check(node.properties[key], propertyPath(`${p}.properties`, key));
+        for (const key of Object.keys(node.properties)) check(node.properties[key], propertyPath(`${p}.properties`, key), depth + 1);
       }
     }
     if (hasOwn(node, "required")) {
@@ -304,7 +316,7 @@ function collectSchemaErrors(schema, location = "schema") {
         }
       }
     }
-    if (hasOwn(node, "items")) check(node.items, `${p}.items`);
+    if (hasOwn(node, "items")) check(node.items, `${p}.items`, depth + 1);
     for (const keyword of ["minItems", "minLength"]) {
       if (hasOwn(node, keyword) && (!Number.isInteger(node[keyword]) || node[keyword] < 0)) {
         errors.push(`${p}.${keyword}: expected a non-negative integer`);
@@ -338,7 +350,7 @@ function collectSchemaErrors(schema, location = "schema") {
       if (!Array.isArray(node.oneOf) || node.oneOf.length === 0) {
         errors.push(`${p}.oneOf: expected a non-empty array`);
       } else {
-        node.oneOf.forEach((branch, index) => check(branch, `${p}.oneOf[${index}]`));
+        node.oneOf.forEach((branch, index) => check(branch, `${p}.oneOf[${index}]`, depth + 1));
       }
     }
   }
@@ -358,10 +370,14 @@ function findDiscriminator(schema) {
   return null;
 }
 
-function validate(value, schema, p, errors) {
+function validate(value, schema, p, errors, depth = 0) {
   if (errors.length >= LIMITS.validationErrors) return;
+  if (depth > LIMITS.nestingDepth) {
+    errors.push(`${p}: exceeds ${LIMITS.nestingDepth} level nesting depth limit`);
+    return;
+  }
   if (hasOwn(schema, "oneOf")) {
-    const results = schema.oneOf.map((branch) => collectUnchecked(value, branch, p));
+    const results = schema.oneOf.map((branch) => collectUnchecked(value, branch, p, depth));
     const passingIndexes = results
       .map((branchErrors, index) => branchErrors.length === 0 ? index : -1)
       .filter((index) => index !== -1);
@@ -398,7 +414,7 @@ function validate(value, schema, p, errors) {
     }
     for (const key of Object.keys(value)) {
       if (hasOwn(schema, "properties") && hasOwn(schema.properties, key)) {
-        validate(value[key], schema.properties[key], propertyPath(p, key), errors);
+        validate(value[key], schema.properties[key], propertyPath(p, key), errors, depth + 1);
       } else if (hasOwn(schema, "additionalProperties") && schema.additionalProperties === false) {
         errors.push(`${p}: unexpected field ${safeQuote(key)}`);
       }
@@ -433,7 +449,7 @@ function validate(value, schema, p, errors) {
       }
     }
     if (hasOwn(schema, "items")) {
-      value.forEach((item, index) => validate(item, schema.items, `${p}[${index}]`, errors));
+      value.forEach((item, index) => validate(item, schema.items, `${p}[${index}]`, errors, depth + 1));
     }
   }
 
@@ -458,9 +474,9 @@ function validate(value, schema, p, errors) {
   }
 }
 
-function collectUnchecked(value, schema, p) {
+function collectUnchecked(value, schema, p, depth = 0) {
   const errors = createErrorList();
-  validate(value, schema, p, errors);
+  validate(value, schema, p, errors, depth);
   return errors;
 }
 
@@ -595,7 +611,7 @@ function validateDocument(findings, schema) {
 }
 
 function loadSchema(schemaPath) {
-  const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
+  const schema = JSON.parse(readFileWithinLimit(schemaPath));
   const errors = collectSchemaErrors(schema);
   if (errors.length > 0) throw new Error(`unsupported or invalid report schema:\n${errors.join("\n")}`);
   return schema;
@@ -644,7 +660,11 @@ function readFileWithinLimit(file) {
       throw new SafeInputError("input is not valid UTF-8");
     }
   } finally {
-    fs.closeSync(descriptor);
+    try {
+      fs.closeSync(descriptor);
+    } catch {
+      // A close failure must not mask an in-flight read error or fail a completed read.
+    }
   }
 }
 
@@ -691,6 +711,14 @@ function enforceJsonTextLimits(contents) {
       });
     } else if (character === "]" || character === "}") {
       containers.pop();
+    } else if (character === ":") {
+      const container = containers[containers.length - 1];
+      if (container && container.type === "object") {
+        container.items++;
+        if (container.items > LIMITS.objectFields) {
+          throw new JsonStructureError(`input exceeds ${LIMITS.objectFields} field object limit`);
+        }
+      }
     } else if (character === ",") {
       const container = containers[containers.length - 1];
       if (container && container.type === "array") container.expectsItem = true;
@@ -762,11 +790,16 @@ module.exports = {
   UNSAFE_DIAGNOSTIC_CHARACTER,
   VISIBLE_CONTENT,
   WINDOWS_RESERVED_COMPONENT,
+  canonicalKey,
   collect,
   collectFindingSemanticErrors,
   collectSchemaErrors,
+  deepEqual,
   hasVisibleProse,
   isSafeRelativeSourcePath,
+  loadSchema,
+  readFileWithinLimit,
+  validate,
   validateDocument,
 };
 

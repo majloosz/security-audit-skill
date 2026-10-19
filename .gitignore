@@ -1,0 +1,15 @@
+# Local secrets and credentials
+.env*
+*.pem
+*.key
+*credentials*.json
+
+# Dependencies
+node_modules/
+
+# Local audit run output (default run-dir name if ever created inside the repo)
+security-audit-skill/
+*.log
+
+# OS noise
+.DS_Store

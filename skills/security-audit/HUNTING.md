@@ -6,20 +6,20 @@ The parent assigns `planned` ledger units to `general` agents. Use enough focuse
 
 When a budget or profile caps hunter count, assign units in priority order and record the ordering rationale in the ledger. Rank by: (1) unauthenticated or lowest-trust entry surfaces before authenticated ones; (2) boundaries protecting the most valuable resources (credentials, cross-tenant data, code execution, release authority); (3) prior-run gaps, revalidation targets, and changed source before same-source re-passes; (4) units whose class historically yields confirmed findings for this target type over speculative ones. Ties break lexicographically by `coverage_id` so runs stay deterministic.
 
-Before launch, the parent changes assigned units to `in_progress`, sets a canonical lowercase `agent_id`, and creates that agent's `scratch/` and parent-owned `artifacts/`. Hunters read source and parent-provided context, write only to their unique `scratch/`, and return one structured result through the Task tool. They never write retained artifacts or edit target source, `architecture.md`, `coverage-ledger.json`, `findings.json`, or another agent's files.
+Before launch, the parent changes assigned units to `in_progress`, sets a canonical lowercase `agent_id`, and creates that agent's `scratch/` and parent-owned `artifacts/`. Hunters read source and parent-provided context, write only to their unique `scratch/`, and return one structured result through the Task tool. They never write retained artifacts or edit target source, `run-metadata.json`, `architecture.md`, `coverage-ledger.json`, `findings.json`, `REPORT.md`, `FINDINGS-DETAIL.md`, `NEEDS-VALIDATION.md`, or another agent's files.
 
 ## Required hunter prompt
 
 Every hunter prompt contains these parts in this order:
 
 1. A two-sentence role preamble: the hunter's goal is to find source-grounded security invariant failures in its assigned units, and it must return exactly one JSON object matching the structured-result contract at the end of this prompt.
-2. `architecture.md` verbatim.
+2. `architecture.md` verbatim inside labeled `<architecture>...</architecture>` delimiters.
 3. Assigned coverage IDs, subsystem, boundary, repository-relative starting paths, and each unit's assignment block map from `coverage-ledger.json`.
 4. The exact selected blocks, copied verbatim: each selected ordinary attack-class block from `ATTACK-CLASSES.md`, and from each selected companion its `Core discipline`, each chosen attack-class subsection, `Universal moves`, and `Validation rules`. Ordinary blocks are self-contained and carry no companion-style `Core discipline`, `Universal moves`, or `Validation rules` sections. Do not send block or companion names alone.
 5. Explicit excluded ordinary and companion blocks with a reason for each exclusion.
 6. The core hunting method below, followed by the promotion procedure block.
 7. The core validation rules below.
-8. Carried same-source prior confirmed exclusions, each limited to fingerprint, title, and root cause, plus peer-owned current coverage IDs that this hunter must not duplicate.
+8. Carried same-source prior confirmed exclusions, each limited to fingerprint, title, and root cause and wrapped in labeled `<prior-exclusion fingerprint="...">...</prior-exclusion>` delimiters, plus peer-owned current coverage IDs that this hunter must not duplicate. The hunter matches exclusions by exact fingerprint, never by semantic similarity.
 9. The unique scratch/artifact paths, safe agent ID, predeclared promotion allowlist and byte limits, and the structured-result contract, including the Structured hunter result block below and the `confirmed` and `needs_validation` branches of `report-schema.json` copied verbatim.
 
 A prompt may select several companion blocks when the same path crosses several domains. Keep their constraints together. Scope is the hunter's coverage obligation, not permission to duplicate excluded work. If an unexpected different boundary appears, return it under `uncovered` so the parent creates a stable ledger unit and assigns it in the next wave.
@@ -83,10 +83,12 @@ Record the exact input, command, limits, and minimum result. For the environment
 record only allowlisted variable names and safe non-secret values needed to reproduce
 the check. Never capture the ambient environment, inherited variables, credentials,
 authentication state, or unrelated host paths. The target-controlled process writes
-only in scratch. After the sandbox and all its processes terminate, only trusted
-parent-side code may promote predeclared scratch-relative files, following the
-promotion procedure block included verbatim in this prompt. You and target code never
-write retained artifacts. If promotion is unavailable or fails for decisive evidence,
+only in scratch. After the parent has killed and reaped all sandbox processes,
+verified none remain, and torn down the loopback namespace and disposable source
+copy, only trusted parent-side code may promote predeclared scratch-relative
+files, following the promotion procedure block included verbatim in this prompt.
+You and target code never write retained artifacts. If promotion is unavailable
+or fails for decisive evidence,
 return needs_validation with the exact promotion blocker.
 Never stress availability, invoke a live target, use a real credential, publish an
 artifact, or continue past the minimum observed effect.
@@ -105,9 +107,10 @@ Reference only for you: the parent performs these steps; you never perform them.
 Before execution, the parent opens and retains trusted, non-inheritable directory
 descriptors for the agent's scratch/ and artifacts/ roots, and records an allowlist
 of expected scratch-relative artifact files plus explicit per-file and cumulative
-byte limits. Never pass those descriptors to the agent or sandbox. After the sandbox
-and all its processes terminate, trusted parent-side code promotes each allowlisted
-file separately:
+byte limits. Never pass those descriptors to the agent or sandbox. After the parent
+has killed and reaped all sandbox processes, verified none remain, and torn down
+the loopback namespace and disposable source copy, trusted parent-side code
+promotes each allowlisted file separately:
 
 1. Validate the declared relative path: reject absolute, empty, `.`, `..`, or
    symlinked components.
@@ -118,7 +121,9 @@ file separately:
    within the recorded per-file and cumulative byte limits.
 5. Enforce those limits again while reading from that descriptor.
 6. Copy exactly the verified size, repeat `fstat`, and reject a changed identity,
-   type, link count, or size.
+   type, link count, or size; then re-read the leaf and reject any byte difference
+   so a same-size swap between the read and the re-`fstat` is rejected like a size
+   change.
 7. For the destination, walk every parent component from the retained
    artifacts-root descriptor with no-follow directory-relative operations; require
    each existing component to be a real directory, and create any missing directory
@@ -160,7 +165,7 @@ file separately:
 
 Local execution is for confirmation, not impact expansion:
 
-- **Allowed only in the required OS sandbox:** offline builds with present dependencies; isolated-loopback processes using dummy state; unit and integration tests; small fixture processing; sanitizers; bounded fuzz/regression tests; deterministic concurrency checks; local browser/emulator tests with dummy accounts; rendered manifests and policy evaluation with dummy identities; mocked external or paid calls.
+- **Allowed only in the required OS sandbox:** offline builds with present dependencies; isolated-loopback processes using dummy state; unit and integration tests; small fixture processing; sanitizers; bounded fuzz/regression tests; deterministic concurrency checks; local browser/emulator tests with dummy accounts and no host devices, sensors, or GPU passthrough except explicitly listed dummy devices under the same file and network confinement; rendered manifests and policy evaluation with dummy identities; mocked external or paid calls.
 - **Disallowed:** live or deployed traffic; requests to services not started for this isolated check; network dependency installation; real accounts or credentials; production data; shared queues, cloud resources, runners, registries, signing or release services; publishing; stress, saturation, or cost generation; any work after the minimum dummy-data boundary result.
 
 The sandbox starts with an empty environment, gives target code no external network or host writable path, and enforces explicit low resource and time limits for every check, not only checks expected to be expensive. Scratch output remains target-controlled after exit. Promote it only with the no-follow, path-confined, regular-file, bounded-size host procedure in `SKILL.md`. Missing any sandbox or promotion capability does not erase a source-grounded candidate; represent the exact blocker in `needs_validation`.

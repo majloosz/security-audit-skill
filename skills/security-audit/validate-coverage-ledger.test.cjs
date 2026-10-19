@@ -11,6 +11,7 @@ const {
   isSafeAgentId,
   isSafeRelativePath,
   preflightJsonText,
+  readFileWithinLimit,
   validateDocument,
 } = require("./validate-coverage-ledger.cjs");
 
@@ -679,6 +680,16 @@ test("rejects deeply nested input without recursion failure", () => {
   assert.doesNotMatch(output, /RangeError|Maximum call stack|stack|at validate-coverage-ledger/i);
 });
 
+test("preflight locations keep the full breadcrumb path", () => {
+  let nestedArrays = 0;
+  for (let depth = 0; depth < 20000; depth++) nestedArrays = [nestedArrays];
+  assert(errorsFor(nestedArrays).some((error) => /^\$(\[0\])+: exceeds nesting depth limit 64/.test(error)));
+
+  let nestedObjects = 0;
+  for (let depth = 0; depth < 20000; depth++) nestedObjects = { only: nestedObjects };
+  assert(errorsFor([nestedObjects]).some((error) => /^\$\[0\]\{0\}(\{\d+\})*: exceeds nesting depth limit 64/.test(error)));
+});
+
 test("rejects multi-megabyte nesting under a constrained Node heap", { skip: !HAS_SAFE_INPUT_OPEN }, () => {
   const openContainers = "[".repeat(2000000);
   const cases = [
@@ -736,5 +747,31 @@ test("accepts a canonical ID derived from near-maximum multibyte references", ()
   if (HAS_SAFE_INPUT_OPEN) {
     const result = runCli(JSON.stringify([value]));
     assert.equal(result.status, 0, cliOutput(result));
+  }
+});
+
+test("a close failure does not mask the original read error", { skip: !HAS_SAFE_INPUT_OPEN }, () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "validate-ledger-close-"));
+  const originalClose = fs.closeSync;
+  fs.closeSync = () => { throw new Error("injected close failure"); };
+  try {
+    assert.throws(() => readFileWithinLimit(directory), /input must be a regular file/);
+  } finally {
+    fs.closeSync = originalClose;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a close failure does not fail a completed read", { skip: !HAS_SAFE_INPUT_OPEN }, () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "validate-ledger-close-"));
+  const inputPath = path.join(directory, "ledger.json");
+  fs.writeFileSync(inputPath, "[]");
+  const originalClose = fs.closeSync;
+  fs.closeSync = () => { throw new Error("injected close failure"); };
+  try {
+    assert.equal(readFileWithinLimit(inputPath), "[]");
+  } finally {
+    fs.closeSync = originalClose;
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });
